@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>회의 녹음 · 어드벤처(주)</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif;background:#1a2f2f;color:#111827;
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.box{background:#fff;border-radius:14px;max-width:440px;width:100%;padding:28px 24px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.25)}
+h1{font-size:18px;color:#1a4f4f;margin-bottom:4px}
+.sub{font-size:14px;color:#6b7280;margin-bottom:22px;word-break:keep-all}
+.tm{font-size:46px;font-weight:800;font-variant-numeric:tabular-nums;color:#111827;margin:6px 0 18px}
+.tm.on{color:#b91c1c}
+.btn{width:100%;padding:18px;border:none;border-radius:10px;font-size:19px;font-weight:800;font-family:inherit;cursor:pointer}
+.go{background:#dc2626;color:#fff}.stop{background:#111827;color:#fff}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.st{margin-top:16px;font-size:14px;color:#374151;line-height:1.6;word-break:keep-all}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#dc2626;margin-right:6px;animation:b 1s infinite}
+@keyframes b{50%{opacity:.2}}
+.warn{margin-top:18px;font-size:13px;color:#b45309;background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;text-align:left;line-height:1.6}
+.err{color:#b91c1c;font-weight:700}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>🎙️ 회의 녹음</h1>
+  <div class="sub" id="title">회의록 관리 시스템</div>
+  <div class="tm" id="tm">00:00</div>
+  <button class="btn go" id="btn">● 녹음 시작</button>
+  <div class="st" id="st">버튼을 누르고 마이크 사용을 허용하세요.</div>
+  <div class="warn">· 녹음 중에는 이 창을 닫거나 화면을 끄지 마세요.<br>· 5분마다 자동으로 받아쓰기가 진행됩니다.<br>· [녹음 종료] 후 회의록 화면으로 돌아가면 자동으로 채워집니다.</div>
+</div>
+<script>
+var SEG_SEC=300, PARALLEL=2;
+var q=new URLSearchParams(location.search), SID=q.get('sid'), API=q.get('api');
+if(q.get('title'))document.getElementById('title').textContent=q.get('title');
+var S={rec:false,stream:null,mr:null,mime:'',t0:0,tick:null,segT:null,idx:0,queue:[],inflight:0,sent:0,done:0,fail:0,ended:false,wake:null};
+var $=function(id){return document.getElementById(id)};
+function fmt(s){s=Math.max(0,Math.round(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  var p=function(n){return(n<10?'0':'')+n};return(h?h+':':'')+p(m)+':'+p(x)}
+function st(t,isErr){$('st').innerHTML=isErr?'<span class="err">'+t+'</span>':t}
+
+if(!SID||!API){$('btn').disabled=true;st('회의록 화면의 [녹음 시작] 버튼으로 이 창을 열어 주세요.',true)}
+
+window.addEventListener('beforeunload',function(e){
+  if(S.rec||S.inflight||S.queue.length){e.preventDefault();e.returnValue='녹음/전송 중입니다.';return e.returnValue}
+});
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='visible'&&S.rec&&!S.wake)wakeOn();
+});
+function wakeOn(){try{navigator.wakeLock&&navigator.wakeLock.request('screen').then(function(w){S.wake=w;w.addEventListener('release',function(){S.wake=null})}).catch(function(){})}catch(e){}}
+
+$('btn').onclick=function(){S.rec?stop():start()};
+
+function start(){
+  if(!navigator.mediaDevices||!window.MediaRecorder){st('이 브라우저는 녹음을 지원하지 않습니다. 크롬을 사용하세요.',true);return}
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}})
+  .then(function(stream){
+    S.stream=stream;S.rec=true;S.t0=Date.now();
+    var c=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
+    for(var i=0;i<c.length;i++)if(MediaRecorder.isTypeSupported(c[i])){S.mime=c[i];break}
+    $('btn').className='btn stop';$('btn').textContent='■ 녹음 종료';$('tm').classList.add('on');
+    S.tick=setInterval(function(){$('tm').textContent=fmt((Date.now()-S.t0)/1000)},500);
+    wakeOn();seg();show();
+  })
+  .catch(function(e){st(e&&e.name==='NotAllowedError'
+      ?'마이크가 차단되었습니다. 주소창 왼쪽 아이콘 → 마이크 → 허용 후 다시 누르세요.'
+      :'마이크를 열 수 없습니다: '+(e&&e.name||e),true)});
+}
+function seg(){
+  var chunks=[],start=(Date.now()-S.t0)/1000;
+  var mr=S.mime?new MediaRecorder(S.stream,{mimeType:S.mime}):new MediaRecorder(S.stream);S.mr=mr;
+  mr.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
+  mr.onstop=function(){
+    var end=(Date.now()-S.t0)/1000;
+    if(S.rec)seg();
+    var blob=new Blob(chunks,{type:mr.mimeType||S.mime||'audio/webm'});
+    if(blob.size>0&&end-start>=1)S.queue.push({idx:S.idx++,start:start,dur:end-start,blob:blob,tries:0});
+    pump();
+    if(!S.rec)S.ended=true,pump();
+  };
+  mr.start(1000);
+  S.segT=setTimeout(function(){if(mr.state!=='inactive')mr.stop()},SEG_SEC*1000);
+}
+function stop(){
+  S.rec=false;clearTimeout(S.segT);clearInterval(S.tick);
+  try{S.wake&&S.wake.release()}catch(e){}
+  $('btn').disabled=true;$('btn').textContent='전송 마무리 중...';$('tm').classList.remove('on');
+  if(S.mr&&S.mr.state!=='inactive')S.mr.stop();
+  S.stream.getTracks().forEach(function(t){t.stop()});
+}
+/* webm/ogg는 그대로(용량 작음), 그 외(아이폰 mp4)는 16kHz WAV로 변환 */
+function toPayload(job,cb,err){
+  var m=(job.blob.type||'').split(';')[0];
+  var fr=new FileReader();
+  if(m==='audio/webm'||m==='audio/ogg'){
+    fr.onload=function(){cb(fr.result.split(',')[1],m)};fr.readAsDataURL(job.blob);return;
+  }
+  fr.onload=function(){
+    var Ctx=window.OfflineAudioContext||window.webkitOfflineAudioContext,ctx=new Ctx(1,16000,16000);
+    ctx.decodeAudioData(fr.result,function(buf){
+      var n=buf.length,ch=buf.numberOfChannels,o=new Float32Array(n);
+      for(var c=0;c<ch;c++){var d=buf.getChannelData(c);for(var i=0;i<n;i++)o[i]+=d[i]/ch}
+      cb(wav(o,buf.sampleRate),'audio/wav');
+    },function(){err('오디오 변환 실패')});
+  };
+  fr.readAsArrayBuffer(job.blob);
+}
+function wav(f,rate){
+  var n=f.length,b=new ArrayBuffer(44+n*2),v=new DataView(b);
+  var w=function(o,s){for(var i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);
+  v.setUint16(22,1,true);v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+  w(36,'data');v.setUint32(40,n*2,true);
+  for(var i=0,o=44;i<n;i++,o+=2){var x=Math.max(-1,Math.min(1,f[i]));v.setInt16(o,x<0?x*0x8000:x*0x7FFF,true)}
+  var u=new Uint8Array(b),s='';for(var j=0;j<u.length;j+=0x8000)s+=String.fromCharCode.apply(null,u.subarray(j,j+0x8000));
+  return btoa(s);
+}
+function post(obj){
+  return fetch(API,{method:'POST',body:JSON.stringify(obj)}).then(function(r){return r.json()});
+}
+function pump(){
+  while(S.inflight<PARALLEL&&S.queue.length){
+    (function(job){
+      S.inflight++;
+      toPayload(job,function(b64,mime){
+        post({action:'seg',sid:SID,idx:job.idx,start:job.start,dur:job.dur,mime:mime,b64:b64})
+        .then(function(r){S.inflight--;S.done++;if(!r.ok)S.fail++;if(r.error&&/세션/.test(r.error))st(r.error,true);show();pump()})
+        .catch(function(){S.inflight--;
+          if(++job.tries<4){setTimeout(function(){S.queue.unshift(job);pump()},5000*job.tries)}
+          else{S.done++;S.fail++;show();pump()}
+        });
+      },function(e){S.inflight--;S.done++;S.fail++;show();pump()});
+    })(S.queue.shift());
+  }
+  show();
+  if(S.ended&&!S.inflight&&!S.queue.length&&!S.finished){
+    S.finished=true;
+    post({action:'end',sid:SID,total:S.idx}).then(function(){
+      $('btn').textContent='✅ 녹음 완료';
+      st('완료되었습니다'+(S.fail?' (실패 '+S.fail+'구간)':'')+'.<br><b>회의록 화면으로 돌아가세요.</b> 받아쓰기와 회의록이 자동으로 채워집니다.<br>이 창은 닫아도 됩니다.');
+      setTimeout(function(){try{window.close()}catch(e){}},4000);
+    }).catch(function(){S.finished=false;setTimeout(pump,5000);st('서버 연결 재시도 중...',true)});
+  }
+}
+function show(){
+  if(S.finished)return;
+  var t=S.rec?'<span class="dot"></span>녹음 중':(S.ended?'전송 마무리 중':'');
+  st(t+' · 받아쓰기 완료 '+S.done+'구간'+(S.queue.length+S.inflight?' · 전송 대기 '+(S.queue.length+S.inflight):'')+(S.fail?' · 실패 '+S.fail:''));
+}
+</script>
+</body>
+</html>
